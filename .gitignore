@@ -1,0 +1,25 @@
+# Secrets (never commit)
+.streamlit/secrets.toml
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+
+# IDE / OS
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+
+# Optional: uncomment if you don't want large data or models in the repo
+# Anomalies_List.csv
+# *.pth
+# *.pkl
+# gan_*_models/
