@@ -129,7 +129,9 @@ def _supabase_client():
     return None
 
 def get_prompt():
-    """Load prompt from Supabase or return default. Cached per run."""
+    """Load prompt: session override (from Save) > Supabase > default. Session keeps edited prompt across reruns."""
+    if st.session_state.get("llm_prompt_override"):
+        return st.session_state["llm_prompt_override"]
     client = _supabase_client()
     if client:
         try:
@@ -202,10 +204,11 @@ with st.sidebar.expander("✏️ Edit prompt", expanded=False):
     edited = st.text_area("LLM prompt template", value=current_prompt, height=200, key="prompt_editor",
                           help="Use {TIME_PERIODS_FOR_LLM} and {full_row_str} as placeholders.")
     if st.button("Save prompt", key="save_prompt_btn"):
+        st.session_state["llm_prompt_override"] = edited  # use for this session across reruns
         if save_prompt(edited):
             st.success("Prompt saved. It will be used for the next analysis.")
         else:
-            st.warning("Could not save (Supabase not configured). Prompt used only for this session.")
+            st.info("Saved for this session only (Supabase not configured). Your prompt will be used until you refresh.")
 
 # Filter data
 filtered_df = df.copy()
