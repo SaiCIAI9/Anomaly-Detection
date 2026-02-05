@@ -478,24 +478,38 @@ if st.session_state.get('show_details', False) and 'selected_anomaly' in st.sess
                     max_tokens=2000
                 )
                 
-                llm_response = response.choices[0].message.content
+                llm_response = (response.choices[0].message.content or "").strip()
                 
-                # Parse LLM response
+                # Parse LLM response (support both old format and custom prompt formats)
                 title = "Anomaly Analysis"
                 key_insight = "Analysis in progress..."
                 summary = "Processing..."
                 key_points = ""
                 
-                if "TITLE:" in llm_response:
-                    title = llm_response.split("TITLE:")[1].split("KEY INSIGHT:")[0].strip()
-                if "KEY INSIGHT:" in llm_response:
-                    key_insight = llm_response.split("KEY INSIGHT:")[1].split("SUMMARY:")[0].strip()
-                if "SUMMARY:" in llm_response:
-                    if "KEY POINTS:" in llm_response:
-                        summary = llm_response.split("SUMMARY:")[1].split("KEY POINTS:")[0].strip()
-                        key_points = llm_response.split("KEY POINTS:")[1].strip()
-                    else:
-                        summary = llm_response.split("SUMMARY:")[1].strip()
+                if "TITLE:" in llm_response and "KEY INSIGHT:" in llm_response:
+                    if "TITLE:" in llm_response:
+                        title = llm_response.split("TITLE:")[1].split("KEY INSIGHT:")[0].strip()
+                    if "KEY INSIGHT:" in llm_response:
+                        key_insight = llm_response.split("KEY INSIGHT:")[1].split("SUMMARY:")[0].strip()
+                    if "SUMMARY:" in llm_response:
+                        if "KEY POINTS:" in llm_response:
+                            summary = llm_response.split("SUMMARY:")[1].split("KEY POINTS:")[0].strip()
+                            key_points = llm_response.split("KEY POINTS:")[1].strip()
+                        else:
+                            summary = llm_response.split("SUMMARY:")[1].strip()
+                else:
+                    # Custom prompt format (e.g. Opening paragraph, Why this matters now, Bottom line): show full response
+                    title = f"Anomaly: {entity_name}"
+                    key_insight = llm_response if llm_response else anomaly_data['Anomaly_Explanation']
+                    summary = ""
+                    key_points = ""
+                
+                # Whatever the prompt format, always show the model output (no stuck placeholders)
+                if llm_response and (key_insight == "Analysis in progress..." or not key_insight.strip()):
+                    key_insight = llm_response
+                    summary = ""
+                if llm_response and summary == "Processing...":
+                    summary = ""
                 
             except Exception as e:
                 st.error(f"Error calling LLM: {str(e)}")
@@ -511,8 +525,9 @@ if st.session_state.get('show_details', False) and 'selected_anomaly' in st.sess
     st.markdown("### 💡 Key Insight")
     st.info(key_insight)
     
-    st.markdown("### 📝 Comprehensive Strategic Analysis")
-    st.markdown(summary)
+    if summary:
+        st.markdown("### 📝 Comprehensive Strategic Analysis")
+        st.markdown(summary)
     
     # Display KEY POINTS if available
     if key_points:
