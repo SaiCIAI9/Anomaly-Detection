@@ -186,12 +186,22 @@ ANOMALY_XLSX_PAYER_PBM = os.path.join(SCRIPT_DIR, 'Anomalies_List_Payer_PBM_T18.
 ANOMALY_XLSX_PAYER_PBM_SOP_NVS = os.path.join(SCRIPT_DIR, 'Anomalies_List_Payer_PBM_T18_WITH_SOP_NVS.xlsx')
 
 def _prefer_excel(csv_path):
-    """If Excel exists with same base name, use it (latest); else use CSV."""
+    """If Excel exists with same base name, use it unless it has very few rows (stale); else use CSV."""
     base = csv_path.rsplit('.', 1)[0]
     xlsx = base + '.xlsx'
-    return xlsx if os.path.exists(xlsx) else csv_path
+    if not os.path.exists(xlsx):
+        return csv_path
+    if not os.path.exists(csv_path):
+        return xlsx
+    try:
+        xl_df = pd.read_excel(xlsx, engine='openpyxl')
+        if len(xl_df) >= 50:
+            return xlsx
+    except Exception:
+        pass
+    return csv_path
 
-@st.cache_data
+@st.cache_data(ttl=600)
 def load_data(csv_path=None):
     """Load anomaly dataset (payer-level T24 or payer-PBM T18). Prefers Excel when available."""
     path = csv_path or (ANOMALY_CSV_PAYER_PBM if os.path.exists(ANOMALY_CSV_PAYER_PBM) else ANOMALY_CSV_PAYER)
@@ -223,6 +233,11 @@ if AZURE_OPENAI_AVAILABLE:
     client = init_azure_openai()
 else:
     client = None
+
+# Refresh data button (clears cache so redeploy picks up new files)
+if st.sidebar.button("Refresh data (clear cache)"):
+    st.cache_data.clear()
+    st.rerun()
 
 # Data source selector (prefer Excel when available for latest data)
 data_options = []
