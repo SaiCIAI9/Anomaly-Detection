@@ -176,18 +176,32 @@ def save_prompt(text):
 def prompt_storage_available():
     return _supabase_client() is not None
 
-# Data sources: payer-level T24 vs payer-PBM T18 (prefer WITH_SOP_NVS when available)
-ANOMALY_CSV_PAYER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Anomalies_List.csv')
-ANOMALY_CSV_PAYER_PBM = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Anomalies_List_Payer_PBM_T18.csv')
-ANOMALY_CSV_PAYER_PBM_SOP_NVS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Anomalies_List_Payer_PBM_T18_WITH_SOP_NVS.csv')
+# Data sources: payer-level T24 vs payer-PBM T18 (prefer Excel when available for latest data)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ANOMALY_CSV_PAYER = os.path.join(SCRIPT_DIR, 'Anomalies_List.csv')
+ANOMALY_CSV_PAYER_PBM = os.path.join(SCRIPT_DIR, 'Anomalies_List_Payer_PBM_T18.csv')
+ANOMALY_CSV_PAYER_PBM_SOP_NVS = os.path.join(SCRIPT_DIR, 'Anomalies_List_Payer_PBM_T18_WITH_SOP_NVS.csv')
+ANOMALY_XLSX_PAYER = os.path.join(SCRIPT_DIR, 'Anomalies_List.xlsx')
+ANOMALY_XLSX_PAYER_PBM = os.path.join(SCRIPT_DIR, 'Anomalies_List_Payer_PBM_T18.xlsx')
+ANOMALY_XLSX_PAYER_PBM_SOP_NVS = os.path.join(SCRIPT_DIR, 'Anomalies_List_Payer_PBM_T18_WITH_SOP_NVS.xlsx')
+
+def _prefer_excel(csv_path):
+    """If Excel exists with same base name, use it (latest); else use CSV."""
+    base = csv_path.rsplit('.', 1)[0]
+    xlsx = base + '.xlsx'
+    return xlsx if os.path.exists(xlsx) else csv_path
 
 @st.cache_data
 def load_data(csv_path=None):
-    """Load anomaly dataset (payer-level T24 or payer-PBM T18 with all features + GAN columns)"""
+    """Load anomaly dataset (payer-level T24 or payer-PBM T18). Prefers Excel when available."""
     path = csv_path or (ANOMALY_CSV_PAYER_PBM if os.path.exists(ANOMALY_CSV_PAYER_PBM) else ANOMALY_CSV_PAYER)
     if not os.path.exists(path):
         path = ANOMALY_CSV_PAYER
-    df = pd.read_csv(path, low_memory=False)
+    path = _prefer_excel(path)
+    if path.endswith('.xlsx'):
+        df = pd.read_excel(path, engine='openpyxl')
+    else:
+        df = pd.read_csv(path, low_memory=False)
     # Derive columns for app compatibility: entity, granularity, anomaly flag, priority
     if 'PRCSN_PAYER_ENT_NM' in df.columns and 'GRANULARITY' not in df.columns:
         df['GRANULARITY'] = df['PRCSN_PAYER_ENT_NM']
@@ -210,14 +224,13 @@ if AZURE_OPENAI_AVAILABLE:
 else:
     client = None
 
-# Data source selector
-st.sidebar.header("Data Source")
+# Data source selector (prefer Excel when available for latest data)
 data_options = []
-if os.path.exists(ANOMALY_CSV_PAYER_PBM_SOP_NVS):
+if os.path.exists(ANOMALY_CSV_PAYER_PBM_SOP_NVS) or os.path.exists(ANOMALY_XLSX_PAYER_PBM_SOP_NVS):
     data_options.append(("Payer-PBM T18 + SOP/NVS (Oct 2024)", ANOMALY_CSV_PAYER_PBM_SOP_NVS))
-elif os.path.exists(ANOMALY_CSV_PAYER_PBM):
+elif os.path.exists(ANOMALY_CSV_PAYER_PBM) or os.path.exists(ANOMALY_XLSX_PAYER_PBM):
     data_options.append(("Payer-PBM T18 (Oct 2024)", ANOMALY_CSV_PAYER_PBM))
-if os.path.exists(ANOMALY_CSV_PAYER):
+if os.path.exists(ANOMALY_CSV_PAYER) or os.path.exists(ANOMALY_XLSX_PAYER):
     data_options.append(("Payer T24 (Apr 2025)", ANOMALY_CSV_PAYER))
 selected_data_label = st.sidebar.selectbox(
     "Dataset",
