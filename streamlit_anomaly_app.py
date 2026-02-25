@@ -6,6 +6,7 @@ Streamlit Application for Anomaly Analysis
 - Click anomaly to get LLM-powered insights
 """
 
+import re
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -87,36 +88,55 @@ MONTH_NAMES = [
 ]
 # T1..T25 map to MONTH_NAMES[0]..[24]. E.g. T24 = Apr 2025, T25 = May 2025.
 T_TO_MONTH = {i + 1: MONTH_NAMES[i] for i in range(25)}
-# Give LLM a short mapping so it uses month names (Apr 2025, May 2025) not "T24"/"T25"
-TIME_PERIODS_FOR_LLM = "T1=May 2023, T9=Jan 2024, T12=Apr 2024, T18=Oct 2024, T20=Dec 2024, T24=Apr 2025, T25=May 2025"
+# Give LLM a short mapping so it uses month names
+TIME_PERIODS_FOR_LLM = "T1=May 2023, T9=Jan 2024, T12=Apr 2024, T17=Sep 2024, T18=Oct 2024, T19=Nov 2024, T20=Dec 2024, T24=Apr 2025, T25=May 2025"
 
-# Default LLM prompt template (used when no stored prompt). Placeholders: {TIME_PERIODS_FOR_LLM}, {full_row_str}
-DEFAULT_LLM_PROMPT = """You are a pharmaceutical market access analyst. Below is one full row for a payer flagged as an anomaly.
+# Prompt with dataset context, time context, anomaly context
+DEFAULT_LLM_PROMPT = """You are a senior pharmaceutical market access strategist. Below is the context and full row for a payer-PBM flagged as an anomaly.
 
-TIME PERIODS (use month names in your response, not T24/T25): {TIME_PERIODS_FOR_LLM}. So say "Apr 2025" or "May 2025", not "T24" or "T25". For other T values, infer the month (e.g. T20 = Dec 2024).
+--- CONTEXT ---
+{dataset_context}
 
-DATA (one row, key: value):
+{time_context}
+
+{anomaly_context}
+
+--- FULL ROW DATA (analyze the entire row for patterns) ---
 {full_row_str}
 
-Rules: Be concise. Lead with one sentence + one number + one action. Do not repeat the same metric in multiple sections. Cite numbers for every claim.
+--- YOUR TASK ---
+Analyze the entire row for patterns. Drill down using relationships (NBRx/TRx, formulary, HCPs, states, MoM), all features, and find reasons why TRx dropped. Use Geoff-style language: strategic, not number dumps. Lead with the insight that would change strategy.
 
 Provide:
-1. TITLE: Short title (max 10 words).
-2. KEY INSIGHT: One sentence: what is wrong, one headline number, one priority action. Then optionally 1–2 more short sentences with 1–2 numbers. No long paragraphs.
-3. SUMMARY: 2–3 short takeaways (volume/trend, flags, what to do). One line each. No repetition of KEY INSIGHT.
-4. KEY POINTS: Short bullets only (one line each). Include numbers. Do not repeat the same metric in both Volume & Trends and Root Causes.
-   - Volume & Trends: 2–3 bullets (TRx/NBRx levels or growth, volatility, trend). Use month names (e.g. May 2025, Apr 2025).
-   - Root causes: 2–3 bullets; each = one cause + one supporting number (e.g. "NBRx/TRx in Apr 2025 = 0.07, below 12M mean → formulary risk").
-   - Actions: 2–3 short bullets (e.g. "Review formulary for May 2025"; "Check HCP engagement").
+1. TITLE: Short strategic title (max 10 words). Not "TRx Drop" but something like "Conversion Gap in IA/NE" or "HCP Disengagement in Top State".
+2. ONE-LINER: The ground-breaking insight in one sentence. Lead with the strategic implication.
+3. KEY INSIGHT: What would surprise an analyst? One sentence. One supporting fact. One concrete action.
+4. SUMMARY: 2–3 strategic takeaways. What broke? What to do?
+5. KEY DRIVERS: List exactly 5 key drivers that explain the TRx drop. Analyze the entire row (TRx, NBRx, NRx, HCPs, states, formulary, MoM, shares, etc.) and identify the top 5 factors. CRITICAL: When citing metrics, use the month name so readers understand (e.g., "HCPs in Oct 2024" or "TRx (Oct 2024)" instead of "HCPs_T18"). Explain what T18 means: T18 = October 2024. Same for T17 = September 2024, T16 = August 2024.
+6. KEY RELATIONSHIP VIOLATIONS: List 2–3 relationship violations. These are metric pairs or ratios that broke expected patterns (e.g., NBRx/TRx ratio outside historical range, HCP count vs TRx mismatch, state share vs expected, formulary vs volume disconnect). For each, cite the metric and explain the violation. Use month names (Oct 2024, Sep 2024), not T18/T17.
+7. KEY POINTS: Short bullets. Focus on patterns and causes.
+   - What the data shows (pattern).
+   - Root cause (formulary? HCP? conversion? state mix?).
+   - Action (specific: which state, formulary, or check).
 
 Format exactly:
 TITLE: [title]
-KEY INSIGHT: [one sentence + number + action; then optional 1–2 sentences]
-SUMMARY: [2–3 short lines]
+ONE-LINER: [strategic insight]
+KEY INSIGHT: [what would surprise an analyst]
+SUMMARY: [2–3 strategic lines]
+KEY DRIVERS:
+1. [driver 1 - use month names, e.g., HCPs in Oct 2024: 10]
+2. [driver 2]
+3. [driver 3]
+4. [driver 4]
+5. [driver 5]
+KEY RELATIONSHIP VIOLATIONS:
+1. [violation 1 - metric pair/ratio that broke, e.g., NBRx/TRx ratio in Oct 2024 outside expected range]
+2. [violation 2]
 KEY POINTS:
-- [short bullets only]
+- [short bullets]
 """
-DEFAULT_SYSTEM_MESSAGE = "You are a senior pharmaceutical market access analyst. Be concise: lead with one sentence, one number, one action. Use month names (e.g. Apr 2025, May 2025, Dec 2024)—never refer to T24, T25, or T20 in the final text. Cite specific metrics; list 2–3 root causes with one supporting number each; do not repeat the same metric in multiple sections."
+DEFAULT_SYSTEM_MESSAGE = "You are a senior pharmaceutical market access strategist. Your audience (Geoff, Binder) wants strategic insights, not number dumps. Use month names (Oct 2024, Sep 2024) in all output—never T17 or T18. When citing metrics, say 'HCPs in Oct 2024' or 'TRx (Oct 2024)' so readers understand; T18 = October 2024, T17 = September 2024. Include metric names so the reader knows which field you mean."
 
 # ----- Prompt storage (Supabase for Streamlit Cloud; optional) -----
 def _supabase_client():
@@ -156,15 +176,18 @@ def save_prompt(text):
 def prompt_storage_available():
     return _supabase_client() is not None
 
-# Load data (Anomalies_List.csv = GAN T24 results joined to full ML dataset)
-ANOMALY_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Anomalies_List.csv')
-if not os.path.exists(ANOMALY_CSV):
-    ANOMALY_CSV = 'Anomalies_List.csv'
+# Data sources: payer-level T24 vs payer-PBM T18 (prefer WITH_SOP_NVS when available)
+ANOMALY_CSV_PAYER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Anomalies_List.csv')
+ANOMALY_CSV_PAYER_PBM = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Anomalies_List_Payer_PBM_T18.csv')
+ANOMALY_CSV_PAYER_PBM_SOP_NVS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Anomalies_List_Payer_PBM_T18_WITH_SOP_NVS.csv')
 
 @st.cache_data
-def load_data():
-    """Load anomaly dataset (Anomalies_List.csv: payer-level with all features + GAN columns)"""
-    df = pd.read_csv(ANOMALY_CSV, low_memory=False)
+def load_data(csv_path=None):
+    """Load anomaly dataset (payer-level T24 or payer-PBM T18 with all features + GAN columns)"""
+    path = csv_path or (ANOMALY_CSV_PAYER_PBM if os.path.exists(ANOMALY_CSV_PAYER_PBM) else ANOMALY_CSV_PAYER)
+    if not os.path.exists(path):
+        path = ANOMALY_CSV_PAYER
+    df = pd.read_csv(path, low_memory=False)
     # Derive columns for app compatibility: entity, granularity, anomaly flag, priority
     if 'PRCSN_PAYER_ENT_NM' in df.columns and 'GRANULARITY' not in df.columns:
         df['GRANULARITY'] = df['PRCSN_PAYER_ENT_NM']
@@ -177,7 +200,8 @@ def load_data():
     priority_col = df.get('Anomaly_Priority', df.get('Priority', pd.Series(['Normal'] * len(df))))
     norm_priority = priority_col.fillna('Normal').astype(str).str.strip().replace({'Medium': 'Med'})
     df['Is_Anomaly'] = (norm_priority != 'Normal')
-    df['GRANULARITY_LEVEL'] = 'Payer'
+    if 'GRANULARITY_LEVEL' not in df.columns:
+        df['GRANULARITY_LEVEL'] = 'Payer-PBM' if 'PRCSN_PBM_VENDOR' in df.columns else 'Payer'
     return df
 
 # Initialize
@@ -185,7 +209,26 @@ if AZURE_OPENAI_AVAILABLE:
     client = init_azure_openai()
 else:
     client = None
-df = load_data()
+
+# Data source selector
+st.sidebar.header("Data Source")
+data_options = []
+if os.path.exists(ANOMALY_CSV_PAYER_PBM_SOP_NVS):
+    data_options.append(("Payer-PBM T18 + SOP/NVS (Oct 2024)", ANOMALY_CSV_PAYER_PBM_SOP_NVS))
+elif os.path.exists(ANOMALY_CSV_PAYER_PBM):
+    data_options.append(("Payer-PBM T18 (Oct 2024)", ANOMALY_CSV_PAYER_PBM))
+if os.path.exists(ANOMALY_CSV_PAYER):
+    data_options.append(("Payer T24 (Apr 2025)", ANOMALY_CSV_PAYER))
+selected_data_label = st.sidebar.selectbox(
+    "Dataset",
+    options=[o[0] for o in data_options],
+    index=0,
+    key="data_source"
+)
+selected_csv = next((p for l, p in data_options if l == selected_data_label), ANOMALY_CSV_PAYER_PBM_SOP_NVS if os.path.exists(ANOMALY_CSV_PAYER_PBM_SOP_NVS) else (ANOMALY_CSV_PAYER_PBM if os.path.exists(ANOMALY_CSV_PAYER_PBM) else ANOMALY_CSV_PAYER))
+df = load_data(selected_csv)
+is_payer_pbm = 'PRCSN_PBM_VENDOR' in df.columns and selected_csv in (ANOMALY_CSV_PAYER_PBM, ANOMALY_CSV_PAYER_PBM_SOP_NVS)
+target_period = 'T18' if is_payer_pbm else 'T24'
 
 # Sidebar filters
 st.sidebar.header("Filters")
@@ -196,13 +239,21 @@ selected_level = st.sidebar.selectbox("Granularity Level", granularity_levels)
 priority_levels = ['All', 'High', 'Med', 'Low', 'Normal']
 selected_priority = st.sidebar.selectbox("Priority", priority_levels)
 
+# SOP/NVS filters (when columns exist)
+sop_filter = 'All'
+nvs_filter = 'All'
+if 'SOP_Pass_Count' in df.columns:
+    sop_filter = st.sidebar.selectbox("SOP Confirmed (3+ of 4)", ['All', 'Yes (3+ pass)', 'No'], key="sop_filter")
+if 'Novartis_Any_Flag' in df.columns:
+    nvs_filter = st.sidebar.selectbox("Novartis Flag", ['All', 'Yes', 'No'], key="nvs_filter")
+
 # Edit prompt (stored in Supabase on Streamlit Cloud; team can improve and save)
 with st.sidebar.expander("✏️ Edit prompt", expanded=False):
     if not prompt_storage_available():
         st.caption("Add SUPABASE_URL and SUPABASE_KEY to secrets to persist prompt.")
     current_prompt = get_prompt()
-    edited = st.text_area("LLM prompt template", value=current_prompt, height=200, key="prompt_editor",
-                          help="Use {TIME_PERIODS_FOR_LLM} and {full_row_str} as placeholders.")
+    edited = st.text_area("LLM prompt template", value=current_prompt, height=220, key="prompt_editor",
+                          help="Placeholders: {dataset_context}, {time_context}, {anomaly_context}, {full_row_str}")
     if st.button("Save prompt", key="save_prompt_btn"):
         st.session_state["llm_prompt_override"] = edited  # use for this session across reruns
         if save_prompt(edited):
@@ -216,6 +267,18 @@ if selected_level != 'All':
     filtered_df = filtered_df[filtered_df['GRANULARITY_LEVEL'] == selected_level]
 if selected_priority != 'All':
     filtered_df = filtered_df[filtered_df['Anomaly_Priority'] == selected_priority]
+if sop_filter == 'Yes (3+ pass)' and 'GAN_Anomaly_Confirmed_3of4' in filtered_df.columns:
+    filtered_df = filtered_df[filtered_df['GAN_Anomaly_Confirmed_3of4'] == 1]
+elif sop_filter == 'No' and 'GAN_Anomaly_Confirmed_3of4' in filtered_df.columns:
+    filtered_df = filtered_df[filtered_df['GAN_Anomaly_Confirmed_3of4'] != 1]
+if nvs_filter == 'Yes' and 'Novartis_Any_Flag' in filtered_df.columns:
+    filtered_df = filtered_df[filtered_df['Novartis_Any_Flag'] == 1]
+elif nvs_filter == 'No' and 'Novartis_Any_Flag' in filtered_df.columns:
+    filtered_df = filtered_df[filtered_df['Novartis_Any_Flag'] != 1]
+
+# Payer-PBM with SOP/NVS: filter to Anomaly_Flag=1 AND Novartis_Any_Flag=1 (all records, T1-T18 focus)
+if is_payer_pbm and 'Anomaly_Flag' in filtered_df.columns and 'Novartis_Any_Flag' in filtered_df.columns:
+    filtered_df = filtered_df[(filtered_df['Anomaly_Flag'] == 1) & (filtered_df['Novartis_Any_Flag'] == 1)]
 
 # Main page
 st.title("🔍 Anomaly Detection Dashboard")
@@ -252,7 +315,7 @@ with col3:
     st.metric(
         label="Spike Anomalies",
         value=f"{spike_anomalies:,}",
-        delta=">20% T24→T25 change"
+        delta="Prediction error above threshold"
     )
 
 with col4:
@@ -261,6 +324,20 @@ with col4:
         value=f"{relationship_anomalies:,}",
         delta="Metric pattern violations"
     )
+
+# SOP/NVS KPIs when available
+if 'SOP_Pass_Count' in filtered_df.columns or 'Novartis_Any_Flag' in filtered_df.columns:
+    st.markdown("#### SOP & Novartis Validation")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        sop3 = (filtered_df['GAN_Anomaly_Confirmed_3of4'] == 1).sum() if 'GAN_Anomaly_Confirmed_3of4' in filtered_df.columns else 0
+        st.metric("SOP 3+ of 4 Pass", f"{sop3:,}", "Business-valid anomalies")
+    with c2:
+        nvs = filtered_df['Novartis_Any_Flag'].sum() if 'Novartis_Any_Flag' in filtered_df.columns else 0
+        st.metric("Novartis Flag", f"{nvs:,}", "Trend break / IF / LOF")
+    with c3:
+        both = ((filtered_df['GAN_Anomaly_Confirmed_3of4'] == 1) & (filtered_df['Novartis_Any_Flag'] == 1)).sum() if all(c in filtered_df.columns for c in ['GAN_Anomaly_Confirmed_3of4', 'Novartis_Any_Flag']) else 0
+        st.metric("SOP 3+ and NVS", f"{both:,}", "Strengthened alerts")
 
 # Breakdown by granularity level
 st.markdown("---")
@@ -320,29 +397,37 @@ with col2:
 st.markdown("---")
 st.header("📋 Anomalies Table")
 
-# Prepare table data
-anomalies_df = filtered_df[filtered_df['Is_Anomaly'] == True].copy()
+# Prepare table data. When filtered to Anomaly_Flag=1 & Novartis_Any_Flag=1, all rows are anomalies
+if is_payer_pbm and 'Anomaly_Flag' in filtered_df.columns and 'Novartis_Any_Flag' in filtered_df.columns:
+    anomalies_df = filtered_df.copy()
+else:
+    anomalies_df = filtered_df[filtered_df['Is_Anomaly'] == True].copy()
 total_entities_filtered = len(filtered_df)
 total_anomalies_filtered = len(anomalies_df)
 
 # Show count so user knows why only N visible (data vs filter)
-st.caption(f"Showing **{total_anomalies_filtered}** anomaly(ies) out of **{total_entities_filtered}** entities. Set **Priority** and **Granularity Level** to *All* in the sidebar to see every flagged anomaly.")
+filter_note = " (Payer-PBM: filtered to Anomaly_Flag=1 and Novartis_Any_Flag=1)" if (is_payer_pbm and 'Novartis_Any_Flag' in df.columns) else ""
+st.caption(f"Showing **{total_anomalies_filtered}** anomaly(ies) out of **{total_entities_filtered}** entities.{filter_note} Set **Priority** and **Granularity Level** to *All* in the sidebar to see every flagged anomaly.")
 
 if len(anomalies_df) > 0:
-    # Select columns for display (Anomalies_List schema: entity, priority, GAN scores, errors, explanation)
+    # Select columns for display (T18 for payer-PBM, T24 for payer)
+    trx_actual = f'TRx_{target_period}_actual'
+    trx_pred = f'TRx_{target_period}_pred'
+    trx_pct = f'TRx_{target_period}_PctError'
     display_cols = [
-        'PRCSN_PAYER_ENT_NM', 'GRANULARITY_LEVEL', 'Anomaly_Priority',
-        'Discriminator_Score', 'TRx_T24_actual', 'TRx_T24_pred', 'TRx_T24_PctError',
-        'Threshold_Score', 'Explanation'
+        'PRCSN_PAYER_ENT_NM', 'PRCSN_PBM_VENDOR' if is_payer_pbm else None, 'GRANULARITY_LEVEL', 'Anomaly_Priority',
+        'Discriminator_Score', trx_actual, trx_pred, trx_pct,
+        'Threshold_Score', 'Explanation',
+        'SOP_Pass_Count', 'GAN_Anomaly_Confirmed_3of4', 'Novartis_Any_Flag', 'Novartis_Reason'
     ]
-    display_cols = [c for c in display_cols if c in anomalies_df.columns]
+    display_cols = [c for c in display_cols if c and c in anomalies_df.columns]
     if not display_cols:
         display_cols = [c for c in ['PRCSN_PAYER_ENT_NM', 'GRANULARITY', 'Anomaly_Priority', 'Explanation'] if c in anomalies_df.columns]
     
     table_df = anomalies_df[display_cols].copy()
     
-    if 'TRx_T24_PctError' in table_df.columns:
-        table_df['TRx_T24_PctError'] = table_df['TRx_T24_PctError'].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "")
+    if trx_pct in table_df.columns:
+        table_df[trx_pct] = table_df[trx_pct].apply(lambda x: f"{float(x):.2f}%" if pd.notna(x) else "")
     
     # Add row numbers
     table_df.insert(0, 'Row', range(1, len(table_df) + 1))
@@ -360,11 +445,13 @@ if len(anomalies_df) > 0:
     # Reset index to ensure positional indexing works
     anomalies_df_reset = anomalies_df.reset_index(drop=True)
     
-    # Create selection options (Anomalies_List: PRCSN_PAYER_ENT_NM, Priority, Threshold_Score)
+    # Create selection options
     anomaly_options = []
     for pos_idx in range(len(anomalies_df_reset)):
         row = anomalies_df_reset.iloc[pos_idx]
         entity = row.get('PRCSN_PAYER_ENT_NM', row.get('GRANULARITY', 'Unknown'))
+        if is_payer_pbm and 'PRCSN_PBM_VENDOR' in row:
+            entity = f"{entity} | {row.get('PRCSN_PBM_VENDOR', '')}"
         level = row.get('GRANULARITY_LEVEL', 'Payer')
         priority = row.get('Anomaly_Priority', row.get('Priority', 'Unknown'))
         score = row.get('Threshold_Score', row.get('Anomaly_Score', 0))
@@ -398,15 +485,18 @@ if st.session_state.get('show_details', False) and 'selected_anomaly' in st.sess
     st.header("🤖 AI-Powered Anomaly Analysis")
     
     selected_anomaly = st.session_state['selected_anomaly']
-    
+    _is_pp = 'PRCSN_PBM_VENDOR' in selected_anomaly
     entity_name = selected_anomaly.get('PRCSN_PAYER_ENT_NM', selected_anomaly.get('GRANULARITY', 'Unknown'))
+    if _is_pp:
+        entity_name = f"{entity_name} | {selected_anomaly.get('PRCSN_PBM_VENDOR', '')}"
     granularity_level = selected_anomaly.get('GRANULARITY_LEVEL', 'Payer')
     
-    # Time series for charts (Anomalies_List: TRx_T1..T25, NBRx_T1..T25, NRx_T1..T25)
+    # Time series for charts. Payer-PBM: T1-T18 only; Payer: T1-T25
+    t_end = 18 if _is_pp else 25
     trx_ts = []
     nbrx_ts = []
     nrx_ts = []
-    for i in range(1, 26):
+    for i in range(1, t_end + 1):
         try:
             v = selected_anomaly.get(f'TRx_T{i}')
             trx_ts.append(float(v) if pd.notna(v) else 0.0)
@@ -423,25 +513,35 @@ if st.session_state.get('show_details', False) and 'selected_anomaly' in st.sess
         except (ValueError, TypeError):
             nrx_ts.append(0.0)
     
+    _tp = 'T18' if _is_pp else 'T24'
+    _trx_actual = selected_anomaly.get(f'TRx_{_tp}_actual', selected_anomaly.get(f'TRx_{_tp}', 0))
+    _trx_pred = selected_anomaly.get(f'TRx_{_tp}_pred', 0)
+    _trx_pct = selected_anomaly.get(f'TRx_{_tp}_PctError', selected_anomaly.get('T24_to_T25_PctChange', 0))
     anomaly_data = {
         'Entity': entity_name,
         'Granularity_Level': granularity_level,
         'Anomaly_Score': selected_anomaly.get('Threshold_Score', selected_anomaly.get('Anomaly_Score', 0)),
         'Anomaly_Priority': selected_anomaly.get('Anomaly_Priority', selected_anomaly.get('Priority', 'Unknown')),
-        'T24_to_T25_Change': selected_anomaly.get('TRx_T24_PctError', selected_anomaly.get('T24_to_T25_PctChange', 0)),
-        'TRx_T24': selected_anomaly.get('TRx_T24_actual', selected_anomaly.get('TRx_T24', 0)),
-        'TRx_T25': selected_anomaly.get('TRx_T25', selected_anomaly.get('T25_TRx', 0)),
+        'T24_to_T25_Change': _trx_pct,
+        'TRx_T24': _trx_actual,
+        'TRx_T25': selected_anomaly.get('TRx_T25', selected_anomaly.get('T25_TRx', 0)) if not _is_pp else _trx_pred,
         'Volatility_Category': selected_anomaly.get('TRx_Volatility_Category', 'Unknown'),
         'Trend_Direction': selected_anomaly.get('TRx_Trend_Direction', 'Unknown'),
         'Anomaly_Explanation': selected_anomaly.get('Explanation', selected_anomaly.get('Anomaly_Explanation', 'No explanation')),
     }
     
-    # Build full row as string for LLM (all features in one row)
-    def _row_str(d, max_len=100):
+    # Build full row as string for LLM. For payer-PBM: only T1-T18 data (all records).
+    def _row_str(d, max_len=250, t1_t18_only=False):
         lines = []
         for k, v in d.items():
             if pd.isna(v) or v == '':
                 continue
+            if t1_t18_only:
+                m = re.match(r'^(\w+)_T(\d+)(.*)$', str(k))
+                if m:
+                    t = int(m.group(2))
+                    if t < 1 or t > 18:
+                        continue
             try:
                 s = f"{k}: {v:.4g}" if isinstance(v, (int, float)) and not isinstance(v, bool) else f"{k}: {v}"
             except Exception:
@@ -450,23 +550,41 @@ if st.session_state.get('show_details', False) and 'selected_anomaly' in st.sess
                 s = s[:max_len] + "..."
             lines.append(s)
         return "\n".join(lines)
-    
-    full_row_str = _row_str(selected_anomaly)
-    
+
+    full_row_str = _row_str(selected_anomaly, t1_t18_only=_is_pp)
+
+    # Build context for LLM based on dataset
+    if _is_pp:
+        vol_group = selected_anomaly.get('Volume_Group', 'GROUP1_High')
+        dataset_context = f"DATASET: ML_DATASET_PAYER_PBM_T17_GROUP_{vol_group}.csv. High-volume payer-PBMs (deciles 1-3 for High, 4-6 for Mid, 7-10 for Low). This entity is in {vol_group}. We trained GAN on T1-T17, predicted T18, and flagged anomalies where actual T18 deviated from expected."
+        time_context = "TIME PERIODS (use these so trend plots align): T1 = May 2023, T2 = Jun 2023, T3 = Jul 2023, T4 = Aug 2023, T5 = Sep 2023, T6 = Oct 2023, T7 = Nov 2023, T8 = Dec 2023, T9 = Jan 2024, T10 = Feb 2024, T11 = Mar 2024, T12 = Apr 2024, T13 = May 2024, T14 = Jun 2024, T15 = Jul 2024, T16 = Aug 2024, T17 = Sep 2024, T18 = Oct 2024. The data you receive is T1-T18 only. Use month names (May 2023 through Oct 2024) in your response so the trend plots below are coherent."
+        anomaly_context = "ANOMALY: We identified an anomaly at TRx level for T18 (Oct 2024). Your job: drill down using relationships (NBRx/TRx, formulary, HCPs, states, MoM), all features, and find reasons why TRx dropped. Use Geoff-style language: strategic, not number dumps."
+    else:
+        dataset_context = "DATASET: Payer-level anomaly list. We compare predicted vs actual TRx at T24 (Apr 2025)."
+        time_context = "TIME PERIODS: T1 = May 2023. T24 = Apr 2025 (anomaly target). Use month names in your response."
+        anomaly_context = "ANOMALY: We identified an anomaly at TRx level for T24. Drill down using relationships and all features. Use Geoff-style language."
+
     # Call LLM for analysis
     if client is None:
         st.warning("⚠️ Azure OpenAI client not available. Using default analysis.")
         title = f"Anomaly: {entity_name}"
         key_insight = anomaly_data['Anomaly_Explanation']
         summary = f"This entity shows an anomaly with score {anomaly_data['Anomaly_Score']}. {anomaly_data['Anomaly_Explanation']}"
+        key_drivers = ""
+        key_relationship_violations = ""
         key_points = ""
     else:
         with st.spinner("🤖 AI is analyzing the anomaly..."):
             prompt_template = get_prompt()
             try:
-                prompt = prompt_template.format(TIME_PERIODS_FOR_LLM=TIME_PERIODS_FOR_LLM, full_row_str=full_row_str)
+                prompt = prompt_template.format(
+                    dataset_context=dataset_context,
+                    time_context=time_context,
+                    anomaly_context=anomaly_context,
+                    full_row_str=full_row_str
+                )
             except KeyError:
-                prompt = prompt_template.replace("{TIME_PERIODS_FOR_LLM}", TIME_PERIODS_FOR_LLM).replace("{full_row_str}", full_row_str)
+                prompt = prompt_template.replace("{dataset_context}", dataset_context).replace("{time_context}", time_context).replace("{anomaly_context}", anomaly_context).replace("{full_row_str}", full_row_str)
             try:
                 response = client.chat.completions.create(
                     model="ciathena-gpt-4o",
@@ -475,33 +593,62 @@ if st.session_state.get('show_details', False) and 'selected_anomaly' in st.sess
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0.1,
-                    max_tokens=2000
+                    max_tokens=2500
                 )
                 
                 llm_response = (response.choices[0].message.content or "").strip()
                 
-                # Parse LLM response (support both old format and custom prompt formats)
+                # Parse LLM response (TITLE, ONE-LINER, KEY INSIGHT, SUMMARY, KEY DRIVERS, KEY POINTS)
                 title = "Anomaly Analysis"
                 key_insight = "Analysis in progress..."
                 summary = "Processing..."
+                key_drivers = ""
+                key_relationship_violations = ""
                 key_points = ""
-                
-                if "TITLE:" in llm_response and "KEY INSIGHT:" in llm_response:
-                    if "TITLE:" in llm_response:
-                        title = llm_response.split("TITLE:")[1].split("KEY INSIGHT:")[0].strip()
-                    if "KEY INSIGHT:" in llm_response:
-                        key_insight = llm_response.split("KEY INSIGHT:")[1].split("SUMMARY:")[0].strip()
-                    if "SUMMARY:" in llm_response:
-                        if "KEY POINTS:" in llm_response:
-                            summary = llm_response.split("SUMMARY:")[1].split("KEY POINTS:")[0].strip()
-                            key_points = llm_response.split("KEY POINTS:")[1].strip()
+                one_liner = ""
+
+                if "TITLE:" in llm_response:
+                    title = llm_response.split("TITLE:")[1].split("\n")[0].strip()
+                    rest = llm_response.split("TITLE:")[1]
+                    if "ONE-LINER:" in rest:
+                        one_liner = rest.split("ONE-LINER:")[1].split("KEY INSIGHT:")[0].strip()
+                    if "KEY INSIGHT:" in rest:
+                        key_insight = rest.split("KEY INSIGHT:")[1].split("SUMMARY:")[0].strip()
+                    if "SUMMARY:" in rest:
+                        if "KEY DRIVERS:" in rest:
+                            summary = rest.split("SUMMARY:")[1].split("KEY DRIVERS:")[0].strip()
+                            drivers_block = rest.split("KEY DRIVERS:")[1]
+                            if "KEY RELATIONSHIP VIOLATIONS:" in drivers_block:
+                                key_drivers = drivers_block.split("KEY RELATIONSHIP VIOLATIONS:")[0].strip()
+                                viol_block = drivers_block.split("KEY RELATIONSHIP VIOLATIONS:")[1]
+                                if "KEY POINTS:" in viol_block:
+                                    key_relationship_violations = viol_block.split("KEY POINTS:")[0].strip()
+                                    key_points = viol_block.split("KEY POINTS:")[1].strip()
+                                else:
+                                    key_relationship_violations = viol_block.strip()
+                            elif "KEY POINTS:" in drivers_block:
+                                key_drivers = drivers_block.split("KEY POINTS:")[0].strip()
+                                key_points = drivers_block.split("KEY POINTS:")[1].strip()
+                            else:
+                                key_drivers = drivers_block.strip()
+                        elif "KEY POINTS:" in rest:
+                            summary = rest.split("SUMMARY:")[1].split("KEY POINTS:")[0].strip()
+                            key_points = rest.split("KEY POINTS:")[1].strip()
                         else:
-                            summary = llm_response.split("SUMMARY:")[1].strip()
+                            summary = rest.split("SUMMARY:")[1].strip()
+                elif "TITLE:" in llm_response and "KEY INSIGHT:" in llm_response:
+                    key_insight = llm_response.split("KEY INSIGHT:")[1].split("SUMMARY:")[0].strip()
+                    if "SUMMARY:" in llm_response and "KEY POINTS:" in llm_response:
+                        summary = llm_response.split("SUMMARY:")[1].split("KEY POINTS:")[0].strip()
+                        key_points = llm_response.split("KEY POINTS:")[1].strip()
+                    key_relationship_violations = ""
                 else:
                     # Custom prompt format (e.g. Opening paragraph, Why this matters now, Bottom line): show full response
                     title = f"Anomaly: {entity_name}"
                     key_insight = llm_response if llm_response else anomaly_data['Anomaly_Explanation']
                     summary = ""
+                    key_drivers = ""
+                    key_relationship_violations = ""
                     key_points = ""
                 
                 # Whatever the prompt format, always show the model output (no stuck placeholders)
@@ -516,26 +663,37 @@ if st.session_state.get('show_details', False) and 'selected_anomaly' in st.sess
                 title = f"Anomaly: {entity_name}"
                 key_insight = anomaly_data['Anomaly_Explanation']
                 summary = f"This entity shows an anomaly with score {anomaly_data['Anomaly_Score']}. {anomaly_data['Anomaly_Explanation']}"
+                key_drivers = ""
+                key_relationship_violations = ""
                 key_points = ""
     
     # Display LLM Analysis (remove markdown formatting from title)
     clean_title = title.replace('**', '').replace('*', '').strip()
-    st.subheader(f"🤖 AI-Powered Anomaly Analysis: {clean_title}")
-    
-    st.markdown("### 💡 Key Insight")
-    st.info(key_insight)
-    
+    st.subheader(f"AI-Powered Anomaly Analysis: {clean_title}")
+
+    # Display with section headers
+    if one_liner:
+        st.markdown("**One-Liner**")
+        st.info(one_liner)
+    if key_insight:
+        st.markdown("**Key Insight**")
+        st.info(key_insight)
     if summary:
-        st.markdown("### 📝 Comprehensive Strategic Analysis")
+        st.markdown("**Summary**")
         st.markdown(summary)
-    
-    # Display KEY POINTS if available
+    if key_drivers:
+        st.markdown("**Key Drivers**")
+        st.markdown(key_drivers)
+    if key_relationship_violations:
+        st.markdown("**Key Relationship Violations**")
+        st.markdown(key_relationship_violations)
     if key_points:
-        st.markdown("### 🔑 Key Points")
+        st.markdown("**Key Points**")
         st.markdown(key_points)
     
     # Trend Lines
-    st.markdown("### 📈 Trend Analysis")
+    trend_title = "May 2023 to Oct 2024 Trend Analysis" if _is_pp else "May 2023 to May 2025 Trend Analysis"
+    st.markdown(f"### {trend_title}")
     
     # Create subplots for each metric
     fig = make_subplots(
@@ -546,15 +704,11 @@ if st.session_state.get('show_details', False) and 'selected_anomaly' in st.sess
     )
     
     # Use actual month names in chronological order (oldest to newest, left to right)
-    # T1 = May 2023 (oldest), T25 = May 2025 (newest/predicted)
-    # MONTH_NAMES is already in chronological order (T1 to T25)
-    time_periods = MONTH_NAMES  # May 2023 (left) to May 2025 (right)
-    
-    # Data is already in T1 to T25 order (trx_ts[0] = T1 = May 2023, trx_ts[24] = T25 = May 2025)
-    # No need to reverse - already in chronological order
-    trx_ts_chrono = trx_ts  # T1 to T25: [May 2023, ..., May 2025]
-    nbrx_ts_chrono = nbrx_ts  # T1 to T25
-    nrx_ts_chrono = nrx_ts  # T1 to T25
+    # Payer-PBM: T1-T18 (May 2023 to Oct 2024). Payer: T1-T25 (May 2023 to May 2025)
+    time_periods = MONTH_NAMES[:t_end]  # T1 to T18 or T25
+    trx_ts_chrono = trx_ts
+    nbrx_ts_chrono = nbrx_ts
+    nrx_ts_chrono = nrx_ts
     
     # TRx trend
     fig.add_trace(
@@ -569,19 +723,21 @@ if st.session_state.get('show_details', False) and 'selected_anomaly' in st.sess
         row=1, col=1
     )
     
-    # Highlight T25 (May 2025) - the predicted/latest month where anomaly occurs
-    # In chronological order, T25 is at the end (right side)
-    fig.add_trace(
-        go.Scatter(
-            x=['May 2025'],  # T25 - the predicted month
-            y=[trx_ts_chrono[24]],  # Last value = T25
-            mode='markers',
-            name='Anomaly Period (May 2025)',
-            marker=dict(color='red', size=12, symbol='diamond'),
-            showlegend=True
-        ),
-        row=1, col=1
-    )
+    # Highlight anomaly period (T18 Oct 2024 for payer-PBM, T25 May 2025 for payer)
+    anomaly_month = 'Oct 2024' if _is_pp else 'May 2025'
+    anomaly_idx = (t_end - 1)  # T18 index 17 or T25 index 24
+    if anomaly_idx < len(trx_ts_chrono):
+        fig.add_trace(
+            go.Scatter(
+                x=[anomaly_month],
+                y=[trx_ts_chrono[anomaly_idx]],
+                mode='markers',
+                name=f'Anomaly Period ({anomaly_month})',
+                marker=dict(color='red', size=12, symbol='diamond'),
+                showlegend=True
+            ),
+            row=1, col=1
+        )
     
     # NBRx trend
     fig.add_trace(
@@ -611,7 +767,7 @@ if st.session_state.get('show_details', False) and 'selected_anomaly' in st.sess
     
     fig.update_layout(
         height=800,
-        title_text="Time Series Trends (May 2023 to May 2025)",
+        title_text=trend_title,
         showlegend=True
     )
     
@@ -647,16 +803,19 @@ if st.session_state.get('show_details', False) and 'selected_anomaly' in st.sess
     st.plotly_chart(fig, use_container_width=True)
     
     # Anomaly Details Table
-    st.markdown("### 📊 Anomaly Details")
-    
+    st.markdown("### Anomaly Details")
+
     t24_t25_val = anomaly_data['T24_to_T25_Change']
     try:
         t24_t25_str = f"{float(t24_t25_val):.2f}%" if pd.notna(t24_t25_val) else "N/A"
     except (ValueError, TypeError):
         t24_t25_str = str(t24_t25_val)
+    trx_label = f'TRx {target_period} % Error'
+    trx_actual_label = f'TRx {target_period} actual'
+    trx_pred_label = f'TRx {target_period} pred' if _is_pp else 'TRx T25'
     details_data = {
         'Metric': ['Entity', 'Granularity Level', 'Threshold Score', 'Priority',
-                   'TRx T24 % Error', 'TRx T24', 'TRx T25', 'Volatility', 'Trend'],
+                   trx_label, trx_actual_label, trx_pred_label, 'Volatility', 'Trend'],
         'Value': [
             entity_name,
             granularity_level,
