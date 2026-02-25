@@ -438,6 +438,23 @@ if len(anomalies_df) > 0:
         use_container_width=True,
         height=400
     )
+
+    # Export to Excel (uses full anomalies_df with all columns for download)
+    try:
+        from io import BytesIO
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            anomalies_df.to_excel(writer, sheet_name='Anomalies', index=False)
+        excel_bytes = buffer.getvalue()
+        st.download_button(
+            label="Download as Excel",
+            data=excel_bytes,
+            file_name=f"Anomalies_{target_period}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_excel"
+        )
+    except ImportError:
+        st.caption("Add openpyxl to requirements.txt for Excel export.")
     
     # Row selection dropdown
     st.markdown("### Select Anomaly for AI Analysis")
